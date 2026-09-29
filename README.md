@@ -42,3 +42,7 @@ Each recipient gets their own message (To: set to their address, not Bcc'd), so 
 - Find `uv`'s path with `which uv` on the machine that will run the cron job — it varies by install method and CPU architecture.
 - If the repo lives in a cloud-synced folder (iCloud Drive, Dropbox, etc.), a cron job can fire before the files finish syncing down on a machine that just booted or reconnected — test once manually, or keep the deployed copy in a plain local folder instead.
 - `apodmail.log` is gitignored.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
