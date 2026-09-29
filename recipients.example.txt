@@ -1,0 +1,4 @@
+# One email address per line. Lines starting with # are ignored.
+# Copy this file to recipients.txt (gitignored) and edit it.
+someone@example.com
+another@example.com

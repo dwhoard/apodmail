@@ -1,0 +1,9 @@
+[project]
+name = "apodmail"
+version = "0.1.0"
+description = "Fetches NASA's Astronomy Picture of the Day and emails it to a local list of recipients"
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.32",
+    "python-dotenv>=1.0",
+]
