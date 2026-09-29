@@ -144,7 +144,7 @@ def build_message(apod: dict, sender: str, recipients: list[str]) -> EmailMessag
     msg["To"] = sender
     msg["Bcc"] = ", ".join(recipients)
 
-    text_lines = [title, date, ""]
+    text_lines = ["Astronomy Picture of the Day", "", title, date, ""]
     if copyright_line:
         text_lines.append(f"Credit: {copyright_line}")
     text_lines += ["", explanation, "", image_url or ""]
@@ -161,6 +161,7 @@ def build_message(apod: dict, sender: str, recipients: list[str]) -> EmailMessag
     html = f"""\
 <html>
   <body style="font-family: sans-serif; max-width: 700px;">
+    <h1>Astronomy Picture of the Day</h1>
     <h2>{title}</h2>
     <p>{date}</p>
     {media_html}
