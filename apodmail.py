@@ -14,15 +14,19 @@ Configuration:
 from __future__ import annotations
 
 import argparse
+import re
 import smtplib
 import sys
 from email.message import EmailMessage
+from html import unescape
 from pathlib import Path
+from urllib.parse import urljoin
 
 import requests
 from dotenv import dotenv_values
 
 APOD_API_URL = "https://api.nasa.gov/planetary/apod"
+APOD_LEGACY_URL_TEMPLATE = "https://apod.nasa.gov/apod/ap{yy}{mm}{dd}.html"
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 465
 
@@ -67,13 +71,72 @@ def fetch_apod(api_key: str, date: str | None) -> dict:
     return response.json()
 
 
+def clean_explanation(text: str) -> str:
+    """Normalize whitespace/dashes in the API's explanation field to match the
+    tidy paragraph layout on the APOD web page."""
+    text = re.sub(r"\s+", " ", text).strip()
+    text = text.replace(" -- ", " — ")
+    return text
+
+
+def fetch_explanation_html(date: str) -> str | None:
+    """Scrape the explanation paragraph (with its hyperlinks) from the legacy
+    apod.nasa.gov page, since the API's explanation field is link-free plain
+    text. Returns None if the page can't be fetched or parsed, so callers can
+    fall back to the API's plain-text explanation."""
+    yyyy, mm, dd = date.split("-")
+    url = APOD_LEGACY_URL_TEMPLATE.format(yy=yyyy[2:], mm=mm, dd=dd)
+    try:
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+    except requests.RequestException:
+        return None
+
+    match = re.search(
+        r"Explanation:\s*</b>(.*?)<p>\s*<center>",
+        response.text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if not match:
+        return None
+
+    fragment = match.group(1).strip()
+    fragment = re.sub(
+        r'href="(?!https?://)([^"]+)"',
+        lambda m: f'href="{urljoin(url, m.group(1))}"',
+        fragment,
+        flags=re.IGNORECASE,
+    )
+    return fragment
+
+
+def html_fragment_to_text(fragment: str) -> str:
+    """Render a scraped explanation fragment as plain text, turning links
+    into 'text (url)' instead of dropping them."""
+    text = re.sub(
+        r'<a\s+[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+        r"\2 (\1)",
+        fragment,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    text = re.sub(r"<[^>]+>", "", text)
+    return clean_explanation(unescape(text))
+
+
 def build_message(apod: dict, sender: str, recipients: list[str]) -> EmailMessage:
     title = apod.get("title", "Astronomy Picture of the Day")
     date = apod.get("date", "")
-    explanation = apod.get("explanation", "")
     copyright_line = apod.get("copyright")
     media_type = apod.get("media_type")
     image_url = apod.get("hdurl") or apod.get("url")
+
+    explanation_fragment = fetch_explanation_html(date) if date else None
+    if explanation_fragment:
+        explanation_html = explanation_fragment
+        explanation = html_fragment_to_text(explanation_fragment)
+    else:
+        explanation = clean_explanation(apod.get("explanation", ""))
+        explanation_html = explanation
 
     msg = EmailMessage()
     msg["Subject"] = f"APOD {date}: {title}"
@@ -102,7 +165,7 @@ def build_message(apod: dict, sender: str, recipients: list[str]) -> EmailMessag
     <p>{date}</p>
     {media_html}
     {credit_html}
-    <p>{explanation}</p>
+    <p>{explanation_html}</p>
   </body>
 </html>
 """
