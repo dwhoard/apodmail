@@ -17,6 +17,7 @@ import argparse
 import re
 import smtplib
 import sys
+import time
 from datetime import date as date_cls
 from email.message import EmailMessage
 from html import unescape
@@ -31,6 +32,8 @@ APOD_CURRENT_URL = "https://science.nasa.gov/apod/"
 SCRAPE_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; apodmail/1.0)"}
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 465
+REQUEST_ATTEMPTS = 3
+REQUEST_BACKOFF_SECONDS = 2
 
 REPO_DIR = Path(__file__).resolve().parent
 ENV_PATH = REPO_DIR / ".env"
@@ -64,12 +67,27 @@ def load_recipients() -> list[str]:
     return recipients
 
 
+def get_with_retries(url: str, **kwargs) -> requests.Response:
+    """GET with a few retries on network/timeout errors — NASA's endpoints
+    occasionally time out on an otherwise-fine request."""
+    last_exc: requests.RequestException | None = None
+    for attempt in range(1, REQUEST_ATTEMPTS + 1):
+        try:
+            response = requests.get(url, timeout=30, **kwargs)
+            response.raise_for_status()
+            return response
+        except requests.RequestException as exc:
+            last_exc = exc
+            if attempt < REQUEST_ATTEMPTS:
+                time.sleep(REQUEST_BACKOFF_SECONDS * attempt)
+    raise last_exc
+
+
 def fetch_apod(api_key: str, date: str | None) -> dict:
     params = {"api_key": api_key}
     if date:
         params["date"] = date
-    response = requests.get(APOD_API_URL, params=params, timeout=30)
-    response.raise_for_status()
+    response = get_with_retries(APOD_API_URL, params=params)
     return response.json()
 
 
@@ -91,8 +109,7 @@ def fetch_current_apod_page(apod_date: str) -> tuple[str, str] | None:
     if apod_date != date_cls.today().isoformat():
         return None
     try:
-        response = requests.get(APOD_CURRENT_URL, timeout=30, headers=SCRAPE_HEADERS)
-        response.raise_for_status()
+        response = get_with_retries(APOD_CURRENT_URL, headers=SCRAPE_HEADERS)
     except requests.RequestException:
         return None
     return response.text, APOD_CURRENT_URL
