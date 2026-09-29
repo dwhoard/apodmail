@@ -222,3 +222,4 @@ __marimo__/
 
 # apodmail local-only files
 recipients.txt
+apodmail.log
