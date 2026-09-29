@@ -167,7 +167,7 @@ def credits_fragment_to_text(fragment: str) -> str:
     return "\n".join(line for line in lines if line)
 
 
-def build_message(apod: dict, sender: str, recipients: list[str]) -> EmailMessage:
+def build_messages(apod: dict, sender: str, recipients: list[str]) -> list[EmailMessage]:
     title = apod.get("title", "Astronomy Picture of the Day")
     date = apod.get("date", "")
     copyright_line = apod.get("copyright")
@@ -208,19 +208,13 @@ def build_message(apod: dict, sender: str, recipients: list[str]) -> EmailMessag
         credits_table_html = ""
         credits_text_lines = []
 
-    msg = EmailMessage()
-    msg["Subject"] = f"APOD {date}: {title}"
-    msg["From"] = sender
-    msg["To"] = sender
-    msg["Bcc"] = ", ".join(recipients)
-
     text_lines = ["Astronomy Picture of the Day", "", title, date, ""]
     if copyright_line:
         text_lines.append(f"Credit: {copyright_line}")
     text_lines += ["", explanation, "", image_url or ""]
     if credits_text_lines:
         text_lines += ["", "-" * 40, *credits_text_lines]
-    msg.set_content("\n".join(text_lines))
+    text_body = "\n".join(text_lines)
 
     credit_html = f"<p><em>Credit: {copyright_line}</em></p>" if copyright_line else ""
     if media_type == "image" and image_url:
@@ -230,7 +224,7 @@ def build_message(apod: dict, sender: str, recipients: list[str]) -> EmailMessag
     else:
         media_html = ""
 
-    html = f"""\
+    html_body = f"""\
 <html>
   <body style="font-family: sans-serif; max-width: 700px;">
     <h1>Astronomy Picture of the Day</h1>
@@ -243,14 +237,24 @@ def build_message(apod: dict, sender: str, recipients: list[str]) -> EmailMessag
   </body>
 </html>
 """
-    msg.add_alternative(html, subtype="html")
-    return msg
+
+    messages = []
+    for recipient in recipients:
+        msg = EmailMessage()
+        msg["Subject"] = f"APOD {date}: {title}"
+        msg["From"] = sender
+        msg["To"] = recipient
+        msg.set_content(text_body)
+        msg.add_alternative(html_body, subtype="html")
+        messages.append(msg)
+    return messages
 
 
-def send_message(msg: EmailMessage, sender: str, app_password: str) -> None:
+def send_messages(messages: list[EmailMessage], sender: str, app_password: str) -> None:
     with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT) as server:
         server.login(sender, app_password)
-        server.send_message(msg)
+        for msg in messages:
+            server.send_message(msg)
 
 
 def main() -> None:
@@ -265,13 +269,14 @@ def main() -> None:
     recipients = load_recipients()
 
     apod = fetch_apod(config["NASA_API_KEY"], args.date)
-    msg = build_message(apod, config["GMAIL_ADDRESS"], recipients)
+    messages = build_messages(apod, config["GMAIL_ADDRESS"], recipients)
 
     if args.dry_run:
-        print(msg)
+        for msg in messages:
+            print(msg)
         return
 
-    send_message(msg, config["GMAIL_ADDRESS"], config["GMAIL_APP_PASSWORD"])
+    send_messages(messages, config["GMAIL_ADDRESS"], config["GMAIL_APP_PASSWORD"])
     print(f"Sent APOD ({apod.get('date')}) to {len(recipients)} recipient(s).")
 
 
