@@ -21,7 +21,7 @@ import time
 from datetime import date as date_cls
 from datetime import datetime
 from email.message import EmailMessage
-from html import unescape
+from html import escape, unescape
 from pathlib import Path
 from urllib.parse import urljoin
 
@@ -85,18 +85,45 @@ def get_with_retries(url: str, **kwargs) -> requests.Response:
     raise last_exc
 
 
-def fetch_apod(api_key: str, date: str | None) -> dict:
+def fetch_apod_from_api(api_key: str, date: str | None) -> dict | None:
+    """Fetch an APOD entry from the API, normalized for build_messages.
+    Returns None (after logging why) if the request fails or the API hands
+    back placeholder data instead of a real entry."""
     params = {"api_key": api_key}
     if date:
         params["date"] = date
     try:
         response = get_with_retries(APOD_API_URL, params=params)
+        data = response.json()
     except requests.RequestException as exc:
         # Don't print exc itself: its message includes the URL with api_key.
         status = exc.response.status_code if exc.response is not None else None
         detail = f"HTTP {status}" if status else type(exc).__name__
-        sys.exit(f"NASA APOD API failed after {REQUEST_ATTEMPTS} attempts ({detail}).")
-    return response.json()
+        print(f"NASA APOD API failed after {REQUEST_ATTEMPTS} attempts ({detail}).", file=sys.stderr)
+        return None
+    except ValueError:
+        print("NASA APOD API returned invalid JSON.", file=sys.stderr)
+        return None
+
+    title = data.get("title")
+    media_url = data.get("hdurl") or data.get("url")
+    # Since the site move, the API sometimes returns the site's generic title
+    # and logo instead of the real entry.
+    if not title or not media_url or title == "NASA Science" or "nasa-logo" in media_url:
+        print("NASA APOD API returned placeholder data.", file=sys.stderr)
+        return None
+    explanation = clean_explanation(data.get("explanation", ""))
+    return {
+        "source": "api.nasa.gov",
+        "title": title,
+        "date": data.get("date", date or ""),
+        "media_type": data.get("media_type"),
+        "media_url": media_url,
+        "copyright": data.get("copyright"),
+        "explanation_text": explanation,
+        "explanation_html": escape(explanation),
+        "credits_rows": None,
+    }
 
 
 def clean_explanation(text: str) -> str:
@@ -107,20 +134,59 @@ def clean_explanation(text: str) -> str:
     return text
 
 
-def fetch_current_apod_page(apod_date: str) -> tuple[str, str] | None:
-    """Fetch science.nasa.gov/apod/, returning (html, url). That page only
-    ever shows today's entry, so this only applies when apod_date is today;
-    the API doesn't expose the explanation's inline links or the credits
-    table, so we scrape this page for both when we can. Returns None if the
-    date isn't today or the page can't be fetched, so callers can fall back
-    to API-only content."""
-    if apod_date != date_cls.today().isoformat():
-        return None
+def fetch_apod_from_page() -> dict | None:
+    """Scrape today's APOD from science.nasa.gov/apod/, normalized for
+    build_messages. That page only ever shows today's entry. It is the
+    primary source: it has the explanation's inline links and the credits
+    table (which the API lacks), and it has stayed correct while the API
+    returned placeholder data. Returns None (after logging why) unless the
+    title, media, and explanation all parse, so a partial layout change
+    falls back to the API instead of sending a half-broken email."""
     try:
         response = get_with_retries(APOD_CURRENT_URL, headers=SCRAPE_HEADERS)
-    except requests.RequestException:
+    except requests.RequestException as exc:
+        print(f"science.nasa.gov/apod/ fetch failed ({type(exc).__name__}).", file=sys.stderr)
         return None
-    return response.text, APOD_CURRENT_URL
+    page_html, base_url = response.text, APOD_CURRENT_URL
+
+    title = extract_hero_title(page_html)
+    media = extract_hero_media(page_html)
+    explanation_fragment = extract_explanation_fragment(page_html, base_url)
+    missing = [
+        name
+        for name, value in [("title", title), ("media", media), ("explanation", explanation_fragment)]
+        if not value
+    ]
+    if missing:
+        print(f"science.nasa.gov/apod/ parse failed (missing {', '.join(missing)}).", file=sys.stderr)
+        return None
+
+    credits_rows = extract_credits_rows(page_html, base_url)
+    media_type, media_url = media
+    return {
+        "source": "science.nasa.gov",
+        "title": title,
+        "date": page_date(credits_rows) or date_cls.today().isoformat(),
+        "media_type": media_type,
+        "media_url": media_url,
+        "copyright": None,  # covered by the credits table
+        "explanation_text": explanation_fragment_to_text(explanation_fragment),
+        "explanation_html": explanation_fragment,
+        "credits_rows": credits_rows,
+    }
+
+
+def page_date(credits_rows: list[tuple[str, str]] | None) -> str | None:
+    """Read the entry's date (e.g. "September 30, 2026") from the credits
+    table's Date row, as YYYY-MM-DD."""
+    for label, value_html in credits_rows or []:
+        if label.lower() == "date":
+            text = clean_explanation(unescape(re.sub(r"<[^>]+>", "", value_html)))
+            try:
+                return datetime.strptime(text, "%B %d, %Y").date().isoformat()
+            except ValueError:
+                return None
+    return None
 
 
 def absolutize_hrefs(fragment: str, base_url: str) -> str:
@@ -227,35 +293,15 @@ def credits_fragment_to_text(fragment: str) -> str:
 
 
 def build_messages(apod: dict, sender: str, recipients: list[str]) -> list[EmailMessage]:
-    title = apod.get("title", "Astronomy Picture of the Day")
-    date = apod.get("date", "")
-    copyright_line = apod.get("copyright")
-    media_type = apod.get("media_type")
-    image_url = apod.get("hdurl") or apod.get("url")
+    title = apod["title"]
+    date = apod["date"]
+    copyright_line = apod["copyright"]
+    media_type = apod["media_type"]
+    image_url = apod["media_url"]
+    explanation = apod["explanation_text"]
+    explanation_html = apod["explanation_html"]
+    credits_rows = apod["credits_rows"]
 
-    page = fetch_current_apod_page(date) if date else None
-    page_html, base_url = page if page else (None, None)
-
-    # Since the move to science.nasa.gov, the API sometimes returns the site's
-    # generic title ("NASA Science") and logo instead of the real entry, so
-    # prefer the page's title and media whenever we have the page.
-    if page_html:
-        title = extract_hero_title(page_html) or title
-        hero_media = extract_hero_media(page_html)
-        if hero_media:
-            media_type, image_url = hero_media
-
-    explanation_fragment = (
-        extract_explanation_fragment(page_html, base_url) if page_html else None
-    )
-    if explanation_fragment:
-        explanation_html = explanation_fragment
-        explanation = explanation_fragment_to_text(explanation_fragment)
-    else:
-        explanation = clean_explanation(apod.get("explanation", ""))
-        explanation_html = explanation
-
-    credits_rows = extract_credits_rows(page_html, base_url) if page_html else None
     if credits_rows:
         credits_table_html = "".join(
             '<tr><th style="text-align:left;vertical-align:top;white-space:nowrap;'
@@ -284,11 +330,11 @@ def build_messages(apod: dict, sender: str, recipients: list[str]) -> list[Email
         text_lines += ["", "-" * 40, *credits_text_lines]
     text_body = "\n".join(text_lines)
 
-    credit_html = f"<p><em>Credit: {copyright_line}</em></p>" if copyright_line else ""
+    credit_html = f"<p><em>Credit: {escape(copyright_line)}</em></p>" if copyright_line else ""
     if media_type == "image" and image_url:
-        media_html = f'<p><img src="{image_url}" alt="{title}" style="max-width:100%;"></p>'
+        media_html = f'<p><img src="{escape(image_url)}" alt="{escape(title)}" style="max-width:100%;"></p>'
     elif image_url:
-        media_html = f'<p><a href="{image_url}">View today\'s APOD media</a></p>'
+        media_html = f'<p><a href="{escape(image_url)}">View today\'s APOD media</a></p>'
     else:
         media_html = ""
 
@@ -296,7 +342,7 @@ def build_messages(apod: dict, sender: str, recipients: list[str]) -> list[Email
 <html>
   <body style="font-family: sans-serif; max-width: 700px;">
     <h1>Astronomy Picture of the Day</h1>
-    <h2>{title}</h2>
+    <h2>{escape(title)}</h2>
     <p>{date}</p>
     {media_html}
     {credit_html}
@@ -340,7 +386,17 @@ def main() -> None:
     config = load_config()
     recipients = load_recipients()
 
-    apod = fetch_apod(config["NASA_API_KEY"], args.date)
+    # Today: scrape the page first, API as fallback. Past dates: API only,
+    # since the page only shows today's entry.
+    today = date_cls.today().isoformat()
+    apod = None
+    if args.date in (None, today):
+        apod = fetch_apod_from_page()
+    if apod is None:
+        apod = fetch_apod_from_api(config["NASA_API_KEY"], args.date)
+    if apod is None:
+        sys.exit("No usable APOD data from the page or the API; nothing sent.")
+
     messages = build_messages(apod, config["GMAIL_ADDRESS"], recipients)
 
     if args.dry_run:
@@ -349,7 +405,7 @@ def main() -> None:
         return
 
     send_messages(messages, config["GMAIL_ADDRESS"], config["GMAIL_APP_PASSWORD"])
-    print(f"Sent APOD ({apod.get('date')}) to {len(recipients)} recipient(s).")
+    print(f"Sent APOD ({apod['date']}, from {apod['source']}) to {len(recipients)} recipient(s).")
 
 
 if __name__ == "__main__":

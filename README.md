@@ -1,7 +1,7 @@
 # apodmail
 Fetches NASA's Astronomy Picture of the Day and emails it to a local list of recipients.
 
-Pulls title, date, image, and explanation from the official [APOD API](https://api.nasa.gov/). When run for today's date, it also scrapes [science.nasa.gov/apod/](https://science.nasa.gov/apod/) for the explanation's inline hyperlinks and its Date / Credit & Copyright / Authors & editors / A service of credits table, since the API doesn't expose those. Runs for a past `--date` fall back to the API's plain-text explanation only (no links, no credits table) since that page only ever shows today's entry.
+For today's entry, it scrapes [science.nasa.gov/apod/](https://science.nasa.gov/apod/) for the title, image (or video link), explanation with its inline hyperlinks, and the Date / Credit & Copyright / Authors & editors / A service of credits table. If the page can't be fetched or parsed, it falls back to the official [APOD API](https://api.nasa.gov/) (plain-text explanation, no links or credits table). Runs for a past `--date` use the API only, since the page only shows today's entry. If neither source gives usable data, nothing is sent and the script exits with status 1.
 
 ## Setup
 
