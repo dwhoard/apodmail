@@ -19,6 +19,7 @@ import smtplib
 import sys
 import time
 from datetime import date as date_cls
+from datetime import datetime
 from email.message import EmailMessage
 from html import unescape
 from pathlib import Path
@@ -142,6 +143,40 @@ def extract_explanation_fragment(page_html: str, base_url: str) -> str | None:
     return absolutize_hrefs(match.group(1).strip(), base_url)
 
 
+def extract_hero_title(page_html: str) -> str | None:
+    """Pull the APOD title from the hero block on science.nasa.gov/apod/."""
+    match = re.search(
+        r'class="media-detail-hero__media.*?<h2[^>]*>(.*?)</h2>',
+        page_html,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if not match:
+        return None
+    title = clean_explanation(unescape(re.sub(r"<[^>]+>", "", match.group(1))))
+    return title or None
+
+
+def extract_hero_media(page_html: str) -> tuple[str, str] | None:
+    """Pull (media_type, url) for the APOD image or video embed from the hero
+    block on science.nasa.gov/apod/."""
+    block = re.search(
+        r'class="media-detail-hero__media(.*?)<h2',
+        page_html,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if not block:
+        return None
+    match = re.search(
+        r'<(img|iframe)\b[^>]*\bsrc="([^"]+)"',
+        block.group(1),
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    media_type = "image" if match.group(1).lower() == "img" else "video"
+    return media_type, unescape(match.group(2))
+
+
 def extract_credits_rows(page_html: str, base_url: str) -> list[tuple[str, str]] | None:
     """Pull the Date / Credit & Copyright / Authors & editors / A service of
     table shown next to the image on science.nasa.gov/apod/."""
@@ -200,6 +235,15 @@ def build_messages(apod: dict, sender: str, recipients: list[str]) -> list[Email
 
     page = fetch_current_apod_page(date) if date else None
     page_html, base_url = page if page else (None, None)
+
+    # Since the move to science.nasa.gov, the API sometimes returns the site's
+    # generic title ("NASA Science") and logo instead of the real entry, so
+    # prefer the page's title and media whenever we have the page.
+    if page_html:
+        title = extract_hero_title(page_html) or title
+        hero_media = extract_hero_media(page_html)
+        if hero_media:
+            media_type, image_url = hero_media
 
     explanation_fragment = (
         extract_explanation_fragment(page_html, base_url) if page_html else None
@@ -288,6 +332,10 @@ def main() -> None:
         "--dry-run", action="store_true", help="Print the email instead of sending it"
     )
     args = parser.parse_args()
+
+    # Separator so each run stands out in the cron log. Flush so it lands
+    # before any stderr output (stdout is block-buffered when redirected).
+    print(f"===== {datetime.now():%Y-%m-%d %H:%M:%S} =====", flush=True)
 
     config = load_config()
     recipients = load_recipients()

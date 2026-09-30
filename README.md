@@ -54,7 +54,7 @@ Then add to `crontab -e`:
 - Find `uv`'s path with `which uv` on the machine that will run the cron job. It varies by install method and CPU architecture.
 - Why local: on macOS, `cron` has no privacy (TCC) access to `~/Library/Mobile Documents`, so a job run from iCloud Drive fails with `Current directory does not exist` from `uv`. Cloud-synced folders can also be stale or missing right after boot. Granting `/usr/sbin/cron` Full Disk Access also works, but gives cron broad access.
 - To update the deployed copy: `cd ~/apodmail && git pull && uv sync`.
-- `apodmail.log` is gitignored.
+- Each run starts with a timestamped `===== YYYY-MM-DD HH:MM:SS =====` line, so days are easy to tell apart in `apodmail.log`. The log is gitignored.
 
 ## License
 
