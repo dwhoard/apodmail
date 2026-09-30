@@ -32,8 +32,8 @@ APOD_CURRENT_URL = "https://science.nasa.gov/apod/"
 SCRAPE_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; apodmail/1.0)"}
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 465
-REQUEST_ATTEMPTS = 3
-REQUEST_BACKOFF_SECONDS = 2
+REQUEST_ATTEMPTS = 5
+REQUEST_BACKOFF_SECONDS = 5
 
 REPO_DIR = Path(__file__).resolve().parent
 ENV_PATH = REPO_DIR / ".env"
@@ -68,8 +68,9 @@ def load_recipients() -> list[str]:
 
 
 def get_with_retries(url: str, **kwargs) -> requests.Response:
-    """GET with a few retries on network/timeout errors — NASA's endpoints
-    occasionally time out on an otherwise-fine request."""
+    """GET with retries and exponential backoff (5, 10, 20, 40 s) on network,
+    timeout, and HTTP errors; NASA's endpoints intermittently time out or
+    return 5xx on an otherwise-fine request."""
     last_exc: requests.RequestException | None = None
     for attempt in range(1, REQUEST_ATTEMPTS + 1):
         try:
@@ -79,7 +80,7 @@ def get_with_retries(url: str, **kwargs) -> requests.Response:
         except requests.RequestException as exc:
             last_exc = exc
             if attempt < REQUEST_ATTEMPTS:
-                time.sleep(REQUEST_BACKOFF_SECONDS * attempt)
+                time.sleep(REQUEST_BACKOFF_SECONDS * 2 ** (attempt - 1))
     raise last_exc
 
 
@@ -87,7 +88,13 @@ def fetch_apod(api_key: str, date: str | None) -> dict:
     params = {"api_key": api_key}
     if date:
         params["date"] = date
-    response = get_with_retries(APOD_API_URL, params=params)
+    try:
+        response = get_with_retries(APOD_API_URL, params=params)
+    except requests.RequestException as exc:
+        # Don't print exc itself: its message includes the URL with api_key.
+        status = exc.response.status_code if exc.response is not None else None
+        detail = f"HTTP {status}" if status else type(exc).__name__
+        sys.exit(f"NASA APOD API failed after {REQUEST_ATTEMPTS} attempts ({detail}).")
     return response.json()
 
 
